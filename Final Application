@@ -1,0 +1,753 @@
+///Header 
+#include <stdio.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <termios.h>
+#include <sys/time.h>
+#include <time.h>
+
+#include <stdlib.h>
+#include <sys/sysinfo.h>
+#include <linux/kernel.h>
+#include "timer_ioctl.h"
+#include "vga_ioctl.h"
+
+
+/////////The color
+#define white	0x00ffffff
+#define blue 	0x00ff0000
+#define green	0x0000ff00
+#define red 	0x000000ff
+#define yellow	0x0000ffff
+#define purple	0x00ff00ff
+#define black	0x00000000
+
+#define BUFFER_SIZE	640*480*4
+#define vga_w	640 //col
+#define vga_h	480	//row
+#define OFLAGS		O_RDWR
+
+//---------------------------------Global Variable-----------------------------
+//VGA
+int row_org;
+int col_org;
+int row_org_image = vga_h/2+18;
+int sub_col_pos;
+int sub_row_pos;
+int sub_col_org;
+int sub_row_org;
+int sub_col_max = 12;
+int sub_row_max = 23;
+int clear_row_org;
+int clear_col_org;
+int clear_row_count;
+char c;
+int count;
+int count2 = 0;
+int ascii;
+int img_row;
+int img_col;
+int count_up;
+char str[100];
+int *buffer;
+//Monitor
+int systemtime;
+volatile int counter_check=0;
+int serial_fd;
+int fd_timer; //file descriptor for timer driver
+int count_uart=0;
+float readtotal=0;
+float writetotal=0;
+float avg_read=0;
+float avg_write=0;
+int counter_array= 0;
+
+char* string0 = "You Entered : ";
+char* string1 = "time between each char to read (s): ";
+char* string2 = "time between each char to write(s): ";
+char* string3 = "Total Number of input: ";
+char* string4 = "Read Total (s): ";
+char* string5 = "Average Time to Read (s): ";
+char* string6 = "Write Total(s): ";
+char* string7 = "Average Time to Write (s) ";
+char* string8 = "Current Console Time (s): ";
+char* string9 = "System Time is (s): ";
+
+
+//-----------------------------------------Structures--------------------------------
+struct termios tio; 
+struct image {
+
+  int *mem_loc;
+
+};
+
+struct image img;
+struct timer_ioctl_data data; // data structure for ioctl calls
+
+
+//----------------------------------Functions Implementation--------------------------
+
+
+
+void sigint_handler(int signum) 
+{
+	printf("Received Signal, signum=%d (%s)\n", signum, strsignal(signum));
+	counter_check ++;
+}
+
+/*
+ * SIGINT Signal Handler
+ */
+void sigio_handler(int signum)
+{
+	printf("Received Signal, signum=%d (%s)\n", signum, strsignal(signum));
+
+	if (fd_timer) {
+		
+		
+		// Reset the count_uarter
+		data.offset = LOAD_REG;
+		data.data = 0x0;
+		ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+		// Set control bits to load value in load register into count_uarter
+		data.offset = CONTROL_REG;
+		data.data = LOAD0;
+		ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+		// Clear the timer
+		data.offset = CONTROL_REG;
+		data.data = 0;
+		ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+		// Set control bits to enable timer, count_uart up
+		data.offset = CONTROL_REG;
+		data.data = ENT0 | ENIT0;
+		ioctl(fd_timer, TIMER_WRITE_REG, &data);
+		counter_check ++;
+
+
+
+		
+	}
+
+	
+}
+
+//Function to read the value of the timer
+__u32 read_timer()
+
+{
+	data.offset = TIMER_REG;
+	ioctl(fd_timer, TIMER_READ_REG, &data);
+	return data.data;
+}
+
+
+//Function to print the timer data
+void print_timer()
+{
+	printf("timer value = %u\n", read_timer());
+	
+}
+
+
+//Function for the average read time
+void avg_readtime(float x)
+{
+	
+	readtotal=readtotal + x; 	
+	
+	printf("readtotal is %f\n", readtotal);
+
+	avg_read= readtotal/(count_uart) ;
+	printf("The average time to read is %f secs\n",avg_read);
+}
+
+
+//Function for the average write time
+void avg_writetime(float y)
+{		
+
+		
+	writetotal=writetotal+ y;	
+	printf("writetotal is %f secs\n",writetotal);
+	avg_write= writetotal/(count_uart);
+	printf("The average time to write is %f seconds\n",avg_write);
+	
+}
+
+//Initialization
+void initialize()
+{
+	//tcgetattr: Get the parameters associated with the terminal referred to by serial_fd and store them in the termios structure referenced by tio.
+	tcgetattr(serial_fd, &tio);
+
+	//cfsetospeed: Set output baud rate 
+	cfsetospeed(&tio, B115200);
+	cfsetispeed(&tio, B115200);
+	tio.c_lflag = tio.c_lflag & ~(ICANON);
+
+	///tcsetattr: Set the parameters associated with the terminal referred to by serial_fd from the termios structure referenced by tio. TCSANOW: The change will occur immediately.
+	tcsetattr(serial_fd, TCSANOW, &tio);
+
+}
+
+
+
+	
+//Start timer
+void start_timer()
+{
+	// Reset the count_uarter
+	data.offset = LOAD_REG;
+	data.data = 0x0;
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+	// Set control bits to load value in load register into count_uarter
+	data.offset = CONTROL_REG;
+	data.data = LOAD0;
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+	// Clear the timer
+	data.offset = CONTROL_REG;
+	data.data = 0;
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+	// Set control bits to enable timer, count_uart up
+	data.offset = CONTROL_REG;
+	data.data = ENT0 | ENIT0;
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+	
+
+}
+
+
+//--------------------------------------------VGA Functions--------------------------------------
+
+//set up background color for the top half
+
+void vga_background_top(int color){
+	int row, col;
+	for (row = 0; row < vga_h/2+18; row++){
+   		for (col = 0; col < vga_w; col++){
+   			*(buffer + col + row*640) = color;
+   		}
+    }
+
+}
+
+//set up background color for the bottom half
+
+void vga_background_bot(int color){
+	int row, col;
+	for (row = vga_h/2+18; row < vga_h; row++){
+   		for (col = 0; col < vga_w; col++){
+   			*(buffer + col + row*640) = color;
+   		}
+    }
+}
+
+
+
+
+//-------------------------Alpha Blending-----------------------------
+int alpha_blending (int *source, int *destination)
+{
+        int b,g,r,bd,gd,rd,as,bs,gs,rs; //added a
+        int pixial = 0;
+//     printf("destination %08x \n",*destination);
+        bd = (*destination >> 16) & 0x000000ff;
+        gd = (*destination >> 8)& 0x000000ff;
+        rd = *destination & 0x000000ff;
+//        printf("blue %02x, green %02x, red %02x \n",bd,gd,rd);
+                                
+//        printf("source %08x \n",*source);
+        as = (*source >> 24) & 0x000000ff;
+        bs = (*source >> 16) & 0x000000ff;
+        gs = (*source >> 8) & 0x000000ff;
+        rs = *source & 0x000000ff;
+//        printf("alpha %02x \n",as);
+//        printf("source: blue %02x, green %02x, red %02x \n",bd,gd,rd);
+
+        b = (bs*as + bd*(255-as))/256;
+        g = (gs*as + gd*(255-as))/256;
+        r = (rs*as + rd*(255-as))/256;
+        
+        b = b & 0x000000ff;
+        b = b << 16; 			//b = 0x00XX0000
+        g = g & 0x000000ff;
+        g = g << 8;  			//g = 0x0000XX00
+        r = r & 0x000000ff; //filter	//r = 0x000000XX
+	//a = 0xff000000;	//added
+//        printf("final blue %02x, final green %02x, final red %02x \n",b,g,r);
+        pixial = b|g|r;			//pixial = 0x00
+    //printf("pixial %08x \n",pixial);
+        return pixial; //0X00,00,00,00
+}
+
+
+//-----------------------------------Place the sub_image on the screen------------------------------
+
+void place_sub(int sub_col_org, int sub_row_org, int count, int row_org, int col_org){
+int img_row;
+int img_col;
+
+for (img_row = 1 ; img_row < sub_row_max; img_row++)
+  {
+	if ((img_row + row_org)>=480)   
+		{break;}
+
+	else if ((img_row + row_org) < 0){
+			continue;
+		}
+ 
+	
+
+          for (img_col = 1 ; img_col < sub_col_max; img_col++)
+	      {
+			
+			 if ((img_col + col_org) >= 640 )
+				{break;}
+
+			else if ((img_col+ col_org) < 0){
+				continue;
+			}
+			
+			
+				else{
+
+
+*(buffer + (img_col+ col_org+count*12) + (img_row + row_org )*640) = alpha_blending((img.mem_loc + (img_col + sub_col_org) + (img_row + sub_row_org)*(192)),(buffer + (img_col+ col_org+count*12) + (img_row + row_org)*640));
+
+			
+				}
+	
+
+		      	}
+	}
+
+
+
+
+
+}
+
+//Print metrics
+void display_number(char*output, char*number){
+
+	int i = 0;
+	int j = 0;
+	int temp;
+
+	
+		
+	
+
+	//output the string to the monitor
+	for(i; i<strlen(output); i++)
+	{
+		
+		count_up++;
+				
+	}
+
+	for(j; j<strlen(number); j++)
+	{	
+
+		temp = (int)number[j];
+		sub_row_pos = temp/16;
+		sub_col_pos = temp%16;
+
+		sub_col_org = sub_col_pos*sub_col_max;
+		sub_row_org = sub_row_pos*sub_row_max;
+		
+		
+		place_sub(sub_col_org, sub_row_org, count_up, row_org,0);
+		
+		count_up++;
+		
+		
+	}
+	
+
+row_org= row_org + sub_row_max;
+
+count_up=0;
+
+
+
+}
+
+void display_string(char*output){
+	int i = 0;
+	int j = 0;
+	int temp;
+	
+	
+		
+	
+
+	//output the string to the monitor
+	for(i; i<strlen(output); i++)
+	{
+		
+		temp = (int)output[i];
+
+		sub_row_pos = temp/16;
+		sub_col_pos = temp%16;
+
+		sub_col_org = sub_col_pos*sub_col_max;
+		sub_row_org = sub_row_pos*sub_row_max;
+	
+		place_sub(sub_col_org, sub_row_org, count_up, row_org,0);
+		
+		count_up++;
+				
+	}
+
+	row_org= row_org + sub_row_max;
+
+	count_up=0;
+
+
+}
+
+
+
+void Clear_box(int clear_row_org, int clear_col_org, int color){
+	int row, col;
+	for (row = clear_row_org; row < clear_row_org + sub_row_max;row++){
+   		for (col = clear_col_org; col < clear_col_org + sub_col_max; col++){
+   			*(buffer + col + row*640) = color;
+   		}
+    }
+
+
+}
+
+void Clear_data(char*output, char*number){
+	int i = 0;
+	int j = 0;
+	//int temp;
+
+	
+		
+	
+
+	
+	for(i; i<strlen(output); i++)
+	{
+		
+		count_up++;
+				
+	}
+
+	for(j; j<strlen(number); j++)
+	{	
+
+		
+
+		clear_col_org = count_up*sub_col_max;
+		clear_row_org = clear_row_count*sub_row_max;
+		
+		Clear_box(clear_row_org, clear_col_org, purple);
+		
+		
+		count_up++;
+		
+		
+	}
+	
+
+clear_row_count++;
+
+count_up=0;
+
+
+}
+
+
+
+
+
+int main(int argc, char *argv[]){
+
+//-------------Declare variables--------------
+	int oflags;
+	float starttime=0.0;
+	float stoptime=0.0;
+	float readdif=0.0;
+	float beforewrite=0.0;
+	float afterwrite=0.0;
+	float writedif=0.0;
+	float console_time_start=0.0;
+	float console_time_end=0.0;
+	float read_difference=0.0;
+	float write_difference=0.0;
+	time_t currenttime;	
+	int image_fd,fd;
+	struct stat sb;
+
+	printf("system time is:%d secs \n",time(&currenttime));
+	console_time_start = time(&currenttime);
+	memset(&tio, 0, sizeof(tio));
+
+	//open device driver file
+	if (!(fd_timer = open("/dev/timer_driver", O_RDWR))) 
+	{
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	//open serial port
+	serial_fd = open("/dev/ttyPS0",O_RDWR);
+	//Console_uptime()ttyPS0;
+	if(serial_fd == -1)
+	{
+		printf("Failed to open serial port... :( \n");//fail safe
+	}
+
+	//initialization
+	initialize();
+
+	//start timer
+	start_timer();
+
+	signal(SIGIO, &sigio_handler);
+	fcntl(fd_timer, F_SETOWN, getpid());
+	oflags = fcntl(fd_timer, F_GETFL);
+	fcntl(fd_timer, F_SETFL, oflags | FASYNC);
+
+	// Load countdown timer initial value for ~1 sec
+	data.offset = LOAD_REG;
+	data.data = 0; // timer runs on 100 MHz clock
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+	sleep(1);
+	
+	// Set control bits to load value in load register into counter
+	data.offset = CONTROL_REG;
+	data.data = LOAD0;
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+	// Set control bits to enable timer, enable interrupt, auto reload mode,
+	//  and count down
+	data.data = ENT0 | ENIT0 | ARHT0;
+	ioctl(fd_timer, TIMER_WRITE_REG, &data);
+
+
+	image_fd = open("/home/root/example2.raw", O_RDONLY);
+
+	if (image_fd == -1){
+		perror("failed to open picture");
+		return 0;
+	}
+
+	fstat(image_fd, &sb);
+
+	img.mem_loc = (int*)mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, image_fd, 0);
+	if (img.mem_loc == -1){
+		perror("failed to map pict");
+		return 0;
+	}
+
+	fd = open("/dev/vga_driver", OFLAGS);
+	if (fd == -1) {
+		perror("failed to open vga driver");
+		return 0;
+	}
+
+	buffer = (int*)mmap(NULL, BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	
+
+
+	vga_background_top(purple);
+	vga_background_bot(black);
+	display_string(string9);
+	display_string(string0);
+	display_string(string1);
+	display_string(string2);
+	display_string(string3);
+	display_string(string4);
+	display_string(string5);
+	display_string(string6);
+	display_string(string7);
+	display_string(string8);
+
+	
+	systemtime = time(&currenttime);
+	
+
+while(1){
+
+	
+		row_org = 0;
+		clear_row_count = 0;
+
+
+//----------------------metrics-------------------------		
+		//write function hw 
+		beforewrite = ((float)read_timer())/100000000;								
+		write(serial_fd, &c, 1); 
+		afterwrite = ((float)read_timer())/100000000;
+		writedif = afterwrite - beforewrite;
+		write_difference=writedif;
+		printf("counter_ check %d inputs \n",counter_check);
+		//read function
+		starttime = ((float)read_timer())/100000000;		
+		read(serial_fd, &c, 1);		
+		//stoptime =time(NULL);
+		stoptime = ((float)read_timer())/100000000;
+		printf("you entered: %c \n",c);
+		if(counter_check<1)
+		{
+		readdif = stoptime - starttime;
+		}	
+		else
+		{
+		readdif = 4+(stoptime-starttime);
+		printf("hello  \n");
+		counter_check=0;
+		}
+       		read_difference=readdif;
+		
+		printf("time between each char to read: %f secs\n",readdif);
+		printf("time between each char to write: %f secs \n",writedif);
+		fflush(stdout);
+		
+		count_uart++;
+		
+ 		printf("There are %d inputs \n",count);
+		
+		avg_readtime(read_difference);//sw timer
+		avg_writetime(write_difference);
+
+		console_time_end= time(&currenttime)-console_time_start;
+		printf("current console time: %f sec\n", console_time_end); 
+		ascii = (int) c;
+	
+
+//---------------------------SET UP upper screen---------------------------
+
+	snprintf (str, sizeof(str), "%d", systemtime);
+	Clear_data(string9,str);
+	display_number(string9,str);
+	snprintf (str, sizeof(str), "%c", c);
+	Clear_data(string0,str);
+	display_number(string0,str);
+	snprintf (str, sizeof(str), "%f", readdif);
+	Clear_data(string1,str);
+	display_number(string1,str);
+	snprintf (str, sizeof(str), "%f", writedif);
+	Clear_data(string2,str);
+	display_number(string2,str);
+	snprintf (str, sizeof(str), "%d", count_uart);
+	Clear_data(string3,str);
+	display_number(string3,str);
+	snprintf (str, sizeof(str), "%f", readtotal);
+	Clear_data(string4,str);
+	display_number(string4,str);
+	snprintf (str, sizeof(str), "%f", avg_read);
+	Clear_data(string5,str);
+	display_number(string5,str);
+	snprintf (str, sizeof(str), "%f", writetotal);
+	Clear_data(string6,str);
+	display_number(string6,str);
+	snprintf (str, sizeof(str), "%f", avg_write);
+	Clear_data(string7,str);
+	display_number(string7,str);
+	snprintf (str, sizeof(str), "%f", console_time_end);
+	Clear_data(string8,str);
+	display_number(string8,str);
+	
+//-------------------------Pressed Enter---------------------------
+	if(ascii==10){
+	if(count2==9){
+	vga_background_bot(black);
+	count=0;
+	row_org_image = vga_h/2+18;
+	count2=0;
+	}
+
+
+	else{ 
+	row_org_image = row_org_image + sub_row_max; 
+	count=0; 
+	count2++;
+	; 
+	}
+	
+		}
+
+	else if(ascii==48){Clear_box(vga_h/2+18,0,black);}
+	else{
+	sub_row_pos = ascii/16;
+	sub_col_pos = ascii%16;
+	
+	
+	
+	sub_col_org = sub_col_pos*sub_col_max;
+	sub_row_org = sub_row_pos*sub_row_max;
+
+
+
+
+
+
+	place_sub(sub_col_org, sub_row_org, count,row_org_image, 0);
+	count++;
+	}
+
+//----------------------------Enter a new line---------------------------
+	
+	if(count==53){
+	
+		if(count2==9){
+			vga_background_bot(black);
+			count2=0;
+			count=0;
+			row_org_image = vga_h/2+18;
+				}
+		else{count=0;
+		row_org_image = row_org_image + sub_row_max;
+		count2++;
+		printf("you entered: \n");
+		}
+
+	}
+    
+	
+
+
+
+
+
+
+
+
+	
+
+}
+
+
+
+
+	return 0;
+
+}
+
+
+
+
+
+
